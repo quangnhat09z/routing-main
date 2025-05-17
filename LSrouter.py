@@ -13,13 +13,9 @@ from typing import Dict, Tuple, List
 
 
 class LSrouter(Router):
-    # ... (phần __init__ và các hàm khác giữ nguyên như bạn đã sửa lỗi TypeError) ...
-    # Ví dụ, create_packet và handle_packet phải đúng như phiên bản đã sửa lỗi TypeError.
-
     def __init__(self, addr, heartbeat_time):
         Router.__init__(self, addr)
-        #self.heartbeat_time = heartbeat_time
-        self.heartbeat_time = float('inf')  # Tạm thời vô hiệu hóa heartbeat
+        self.heartbeat_time = heartbeat_time
 
         self.last_time = 0
         self.link_costs: Dict[Tuple[int, str], float] = {}  # (port, endpoint_addr): cost
@@ -29,24 +25,24 @@ class LSrouter(Router):
         self.neighbors: Dict[int, str] = {}  # port: endpoint_addr
         self.seq_num: int = 0
 
-        # Quan trọng: Đảm bảo self.addr có entry trong link_state_db ngay từ đầu nếu cần
-        # Hoặc, nó sẽ được tạo khi link đầu tiên được thêm.
-        # self.link_state_db[self.addr] = {} # Khởi tạo để self.addr luôn là một key
+        # Đảm bảo self.addr có entry trong link_state_db ngay từ đầu
+        self.link_state_db[self.addr] = {}
 
     def create_packet(self, content_input, is_traceroute=False):
         kind = Packet.TRACEROUTE if is_traceroute else Packet.ROUTING
-        links_for_payload = {}
-        if not is_traceroute:
-            # content_input là self.link_costs = {(port, endpoint): cost}
-            # Chuyển đổi thành {endpoint: cost}
-            links_for_payload = {endpoint: cost for (port, endpoint), cost in content_input.items()}
-        else:
-            links_for_payload = content_input
+        payload_dict = {}
 
-        payload_dict = {
-            'links': links_for_payload,
-            'seq_num': self.seq_num if not is_traceroute else 0  # traceroute không cần seq_num thực sự
-        }
+        if not is_traceroute:
+            # Chuyển đổi thành {endpoint: cost} cho routing packet
+            links_for_payload = {endpoint: cost for (port, endpoint), cost in content_input.items()}
+            payload_dict = {
+                'links': links_for_payload,
+                'seq_num': self.seq_num
+            }
+        else:
+            # Cho traceroute packet
+            payload_dict = content_input
+
         content_str = json.dumps(payload_dict)
         return Packet(kind, self.addr, None, content_str)
 
@@ -55,201 +51,203 @@ class LSrouter(Router):
         previous: Dict[str, str] = {}
         pq: List[Tuple[float, str]] = [(0, self.addr)]
 
+        # Tạo một bản sao của LSDB để tránh thay đổi trong quá trình chạy Dijkstra
+        lsdb_copy = {router: dict(links) for router, links in self.link_state_db.items()}
+
         while pq:
             current_dist, current_node = heapq.heappop(pq)
 
+            # Tối ưu: bỏ qua nếu đã tính toán đường đi tốt hơn
             if current_dist > distances.get(current_node, float('inf')):
                 continue
 
-            if current_node not in self.link_state_db:  # current_node có thể là client hoặc router chưa gửi LSP
+            # Kiểm tra xem nút hiện tại có trong LSDB không
+            if current_node not in lsdb_copy:
                 continue
 
-            # Sắp xếp các neighbor theo tên để đảm bảo thứ tự xử lý nhất quán (Hỗ trợ tie-breaking)
-            # self.link_state_db[current_node] là một dict {neighbor_addr: cost}
-            # .items() trả về list các tuple (neighbor_addr, cost)
-            # sorted() sẽ sắp xếp dựa trên phần tử đầu tiên của tuple (tên neighbor)
-            sorted_neighbors_items = sorted(self.link_state_db[current_node].items())
+            # Xử lý các nút lân cận, sắp xếp theo tên để đảm bảo tie-breaking nhất quán
+            sorted_neighbors = sorted(lsdb_copy[current_node].items(), key=lambda x: x[0])
 
-            for neighbor_node, cost in sorted_neighbors_items:  # Duyệt theo thứ tự đã sắp xếp
+            for neighbor_node, cost in sorted_neighbors:
                 new_dist = current_dist + cost
+
+                # Cập nhật nếu tìm thấy đường đi ngắn hơn
                 if new_dist < distances.get(neighbor_node, float('inf')):
                     distances[neighbor_node] = new_dist
                     previous[neighbor_node] = current_node
                     heapq.heappush(pq, (new_dist, neighbor_node))
 
-        # Phần xây dựng forwarding_table giữ nguyên
+                # Xử lý tie-breaking: nếu cùng độ dài, ưu tiên đường đi có thứ tự từ điển nhỏ hơn
+                elif new_dist == distances.get(neighbor_node, float('inf')):
+                    if current_node < previous.get(neighbor_node, current_node):
+                        previous[neighbor_node] = current_node
+                        # Không cần đẩy lại vào heap vì khoảng cách không thay đổi
+
+        # Xây dựng bảng chuyển tiếp
         new_forwarding_table: Dict[str, int] = {}
-        # ... (logic xây dựng forwarding_table như trước) ...
+
         for dst_addr in distances:
-            if dst_addr == self.addr or distances[dst_addr] == float('inf'):
-                continue
-            path_tracer_node = dst_addr
-            while path_tracer_node in previous and previous[path_tracer_node] != self.addr:
-                path_tracer_node = previous[path_tracer_node]
-
-            if path_tracer_node == self.addr:  # Should not happen if dst_addr is reachable and not self
+            if dst_addr == self.addr:
                 continue
 
-            found_port_for_first_hop = False
-            for port_num, neighbor_endpoint in self.neighbors.items():
-                if neighbor_endpoint == path_tracer_node:
-                    new_forwarding_table[dst_addr] = port_num
-                    found_port_for_first_hop = True
+            # Bỏ qua các đích không thể đến được
+            if distances[dst_addr] == float('inf'):
+                continue
+
+            # Khôi phục đường đi từ dst về self để tìm hop đầu tiên
+            path = []
+            current = dst_addr
+            while current != self.addr and current in previous:
+                path.append(current)
+                current = previous[current]
+
+            if current != self.addr:  # Không tìm thấy đường đi đến đích
+                continue
+
+            if not path:  # Trường hợp đặc biệt: đích là neighbor trực tiếp
+                continue
+
+            # Hop đầu tiên là node cuối cùng trong path (vì path được xây dựng ngược)
+            first_hop = path[-1]
+
+            # Tìm port tương ứng với hop đầu tiên
+            for port, neighbor in self.neighbors.items():
+                if neighbor == first_hop:
+                    new_forwarding_table[dst_addr] = port
                     break
-            # Optional: Add a warning if port not found, though it shouldn't happen with correct logic
-            # if not found_port_for_first_hop and path_tracer_node in distances and distances[path_tracer_node] != float('inf'):
-            #    print(f"Router {self.addr}: WARNING - No port found for first hop {path_tracer_node} to dst {dst_addr}")
 
+        # Cập nhật forwarding table một cách nguyên tử để tránh trạng thái không nhất quán
         self.forwarding_table = new_forwarding_table
 
     def broadcast_link_state(self):
+        # Tăng sequence number khi gửi LSP mới
         self.seq_num += 1
-        # self.link_costs chứa {(port, endpoint): cost}
-        # create_packet sẽ chuyển nó thành {endpoint: cost} cho payload
-        packet_content = self.link_costs
-        packet = self.create_packet(packet_content, is_traceroute=False)
-        for port in self.neighbors:  # self.neighbors là {port: endpoint_addr}
+
+        # Cập nhật LSDB của chính router này
+        current_self_links = {endpoint: cost for (port, endpoint), cost in self.link_costs.items()}
+        self.link_state_db[self.addr] = current_self_links
+
+        # Lưu trữ sequence number của chính mình vào LSDB
+        self.sequence_numbers[self.addr] = self.seq_num
+
+        # Tạo và gửi LSP
+        packet = self.create_packet(self.link_costs, is_traceroute=False)
+
+        # In debug nếu cần
+        # print(f"ROUTER {self.addr}: Broadcasting LSP with seq_num={self.seq_num}, links={current_self_links}")
+
+        # Gửi đến tất cả các neighbor
+        for port in list(self.neighbors.keys()):
             try:
                 self.send(port, packet)
-            except KeyError:  # Port có thể không còn hợp lệ nếu link vừa bị xóa
-                continue
+            except KeyError:
+                pass
 
     def handle_packet(self, port, packet):
-        # Giả sử bạn có một cách để truy cập thời gian mô phỏng hiện tại, ví dụ: self.network_time_ms
-        # Nếu không, bạn có thể bỏ qua phần [TIME_MS] hoặc tìm cách truyền nó vào.
-        # Trong nhiều framework mô phỏng, thời gian được truyền vào hàm handle_time,
-        # nhưng không trực tiếp vào handle_packet. Bạn có thể cần lưu nó từ handle_time.
-        # Hoặc, nếu network.py gọi handle_packet, nó có thể truyền thời gian.
-        # Hiện tại, tôi sẽ để placeholder [TIME_MS].
-
         if packet.is_traceroute:
-            if packet.dst_addr in self.forwarding_table:
+            # Xử lý traceroute packet
+            if packet.dst_addr == self.addr:
+                # Đã đến đích, không cần chuyển tiếp
+                return
+            elif packet.dst_addr in self.forwarding_table:
+                # Chuyển tiếp đến đích
                 try:
-                    self.send(self.forwarding_table[packet.dst_addr], packet)
+                    next_port = self.forwarding_table[packet.dst_addr]
+                    self.send(next_port, packet)
                 except KeyError:
+                    # Port đã bị xóa sau khi bảng định tuyến được tính toán
                     pass
-        else:  # Routing packet
+        else:
+            # Xử lý routing packet (LSP)
             try:
                 content_data = json.loads(packet.content)
-                links_from_packet = content_data['links']
-                seq_num_from_packet = content_data['seq_num']
-            except (json.JSONDecodeError, KeyError) as e:
-                # In lỗi nếu có vấn đề với gói tin để biết nó là gì
-                print(
-                    f"ROUTER {self.addr} [TIME_MS]: ERROR decoding packet from port {port}. Content: '{packet.content}'. Error: {e}")
+                links_from_packet = content_data.get('links', {})
+                seq_num_from_packet = content_data.get('seq_num', -1)
+            except (json.JSONDecodeError, KeyError):
+                # Lỗi phân tích nội dung packet
                 return
 
             src_addr = packet.src_addr
+            current_seq = self.sequence_numbers.get(src_addr, -1)
 
-            # Log trước khi kiểm tra sequence number
-            print(
-                f"ROUTER {self.addr} [TIME_MS]: Received ROUTING packet from {src_addr} on port {port}. Seq_rcvd={seq_num_from_packet}. Links_in_pkt={links_from_packet}. Current_stored_seq_for_src={self.sequence_numbers.get(src_addr, 'None')}")
+            # Kiểm tra sequence number
+            if seq_num_from_packet <= current_seq:
+                # LSP cũ hoặc trùng lặp, bỏ qua
+                return
 
-            if src_addr not in self.sequence_numbers or \
-                    seq_num_from_packet > self.sequence_numbers.get(src_addr,
-                                                                    -1):  # -1 để đảm bảo seq 0 được chấp nhận nếu chưa có
+            # Cập nhật sequence number
+            self.sequence_numbers[src_addr] = seq_num_from_packet
 
-                print(
-                    f"  ROUTER {self.addr} [TIME_MS]: ACCEPTED NEW LSP from {src_addr}. Old_stored_seq={self.sequence_numbers.get(src_addr, 'None')}, New_seq={seq_num_from_packet}.")
+            # Chuẩn hóa links và cập nhật LSDB
+            updated_links = {str(neighbor): float(cost) for neighbor, cost in links_from_packet.items()}
 
-                self.sequence_numbers[src_addr] = seq_num_from_packet
+            # Kiểm tra xem có sự thay đổi thực sự không
+            old_links = self.link_state_db.get(src_addr, {})
+            links_changed = (old_links != updated_links)
 
-                # Cập nhật link_state_db[src_addr] với thông tin từ LSP mới
-                # Đảm bảo keys là string và values là float
-                updated_links_for_src = {
-                    str(neighbor): float(cost)
-                    for neighbor, cost in links_from_packet.items()
-                }
+            # Cập nhật LSDB
+            self.link_state_db[src_addr] = updated_links
 
-                # Dòng if not links_from_packet: self.link_state_db[src_addr] = {} là thừa
-                # vì dictionary comprehension ở trên đã xử lý trường hợp rỗng.
-                # Nó sẽ gán một dict rỗng nếu links_from_packet rỗng.
-                self.link_state_db[src_addr] = updated_links_for_src
+            # Chỉ chạy Dijkstra nếu thực sự có sự thay đổi trong liên kết
+            if links_changed:
+                self.dijkstra()
 
-                print(
-                    f"  ROUTER {self.addr} [TIME_MS]: Updated LSA for {src_addr} in local DB: {self.link_state_db[src_addr]}")
-
-                # Vì link_state_db đã thay đổi, chạy lại Dijkstra
-                print(f"  ROUTER {self.addr} [TIME_MS]: Running Dijkstra due to LSP from {src_addr}...")
-                self.dijkstra()  # Hàm dijkstra của bạn cũng nên có log về kết quả FT nếu cần
-                print(
-                    f"  ROUTER {self.addr} [TIME_MS]: Dijkstra FINISHED. New Forwarding Table: {self.forwarding_table}")
-
-                # Quảng bá LSP này đến các neighbor khác
-                # Sử dụng list để tránh lỗi nếu self.neighbors thay đổi trong lúc lặp
-                neighbor_ports = list(self.neighbors.keys())
-                if neighbor_ports:  # Chỉ flood nếu có neighbor
-                    print(
-                        f"  ROUTER {self.addr} [TIME_MS]: Flooding LSP from {src_addr} (seq {seq_num_from_packet}) to neighbors: {neighbor_ports} (excluding port {port})")
-                    for out_port in neighbor_ports:
-                        if out_port != port:  # Không gửi lại cổng vừa nhận
-                            try:
-                                # print(f"    ROUTER {self.addr} [TIME_MS]: Flooding to port {out_port}") # Log chi tiết hơn nếu cần
-                                self.send(out_port, packet)  # Gửi gói tin gốc
-                            except KeyError:
-                                print(
-                                    f"    ROUTER {self.addr} [TIME_MS]: ERROR - Failed to flood to port {out_port} (KeyError, port likely removed).")
-                                continue  # Bỏ qua nếu port không còn hợp lệ
-                else:
-                    print(f"  ROUTER {self.addr} [TIME_MS]: No neighbors to flood LSP from {src_addr}.")
-
-            else:  # LSP cũ hoặc có sequence number bằng
-                print(
-                    f"  ROUTER {self.addr} [TIME_MS]: REJECTED/OLD LSP from {src_addr}. Seq_rcvd={seq_num_from_packet}, Stored_seq={self.sequence_numbers.get(src_addr, 'None')}.")
+            # Luôn chuyển tiếp LSP đến các neighbor khác (trừ nguồn)
+            for out_port in list(self.neighbors.keys()):
+                if out_port != port:  # Không gửi lại đến port đã nhận
+                    try:
+                        self.send(out_port, packet)
+                    except KeyError:
+                        # Port đã bị xóa sau khi bắt đầu loop
+                        continue
 
     def handle_new_link(self, port, endpoint, cost):
-        print(f"ROUTER {self.addr} TIME [TIME]: handle_new_link(port={port}, ep={endpoint}, cost={cost}) CALLED.")
-        print(
-            f"  BEFORE: neighbors={self.neighbors}, link_costs={self.link_costs}, lsa_self={self.link_state_db.get(self.addr)}")
-
-        # ... (code hiện tại của bạn) ...
+        # Thêm hoặc cập nhật link
         self.link_costs[(port, endpoint)] = float(cost)
         self.neighbors[port] = endpoint
-        current_self_links = {ep: c for (p, ep), c in self.link_costs.items()}
+
+        # Cập nhật LSDB cho chính mình
+        current_self_links = {endpoint: c for (p, endpoint), c in self.link_costs.items()}
         self.link_state_db[self.addr] = current_self_links
 
-        print(
-            f"  AFTER: neighbors={self.neighbors}, link_costs={self.link_costs}, lsa_self={self.link_state_db.get(self.addr)}")
-
+        # Tính toán lại các đường đi
         self.dijkstra()
-        print(f"  AFTER DIJKSTRA: forwarding_table={self.forwarding_table}")
-        self.broadcast_link_state()  # broadcast_link_state cũng nên có log về seq_num và nội dung gửi đi
+
+        # Thông báo cho các router khác về thay đổi
         self.broadcast_link_state()
 
-    def handle_remove_link(self, port):
-        print(f"ROUTER {self.addr} TIME [TIME]: handle_remove_link(port={port}) CALLED.")
-        if port in self.neighbors:
-            # ... (in trạng thái BEFORE tương tự như trên) ...
-            print(
-                f"  BEFORE: port_to_remove={port}, current_neighbor_at_port={self.neighbors.get(port)}, neighbors={self.neighbors}, link_costs={self.link_costs}, lsa_self={self.link_state_db.get(self.addr)}")
+        # ❌ QUAN TRỌNG: Không cần broadcast liên tục, chỉ một lần là đủ
+        # self.broadcast_link_state()  # Dòng này gây ra dao động định tuyến
 
+    def handle_remove_link(self, port):
+        # Kiểm tra xem port có tồn tại không
+        if port in self.neighbors:
+            # Lưu endpoint trước khi xóa để debug
             removed_endpoint = self.neighbors.pop(port)
-            self.link_costs = {k_tuple: v_cost for k_tuple, v_cost in self.link_costs.items() if k_tuple[0] != port}
-            current_self_links = {ep: c for (p, ep), c in self.link_costs.items()}
+
+            # Cập nhật link_costs bằng cách lọc ra tất cả ngoại trừ port bị xóa
+            self.link_costs = {k: v for k, v in self.link_costs.items() if k[0] != port}
+
+            # Cập nhật LSDB cho chính mình
+            current_self_links = {endpoint: c for (p, endpoint), c in self.link_costs.items()}
             self.link_state_db[self.addr] = current_self_links
 
-            print(
-                f"  AFTER: removed_ep={removed_endpoint}, neighbors={self.neighbors}, link_costs={self.link_costs}, lsa_self={self.link_state_db.get(self.addr)}")
-
+            # Tính toán lại các đường đi
             self.dijkstra()
-            print(f"  AFTER DIJKSTRA: forwarding_table={self.forwarding_table}")
+
+            # Thông báo cho các router khác về thay đổi
             self.broadcast_link_state()
 
     def handle_time(self, time_ms):
+        # Kiểm tra xem có nên gửi heartbeat không
         if time_ms - self.last_time >= self.heartbeat_time:
             self.last_time = time_ms
-            # Nếu không có neighbor nào, không cần broadcast
+            # Gửi LSP định kỳ nếu có neighbors
             if self.neighbors:
+                # Chỉ broadcast nếu đã qua đủ thời gian heartbeat
+                # Tránh broadcast quá thường xuyên
                 self.broadcast_link_state()
 
-    # def handle_time(self, time_ms):
-    #     """Handle current time."""
-    #     if time_ms - self.last_time >= self.heartbeat_time:
-    #         self.last_time = time_ms
-    #         # Luôn cố gắng broadcast link state.
-    #         # broadcast_link_state sẽ không gửi nếu không có neighbors.
-    #         # self.seq_num sẽ tăng, phản ánh LSP mới nhất (có thể là rỗng).
-    #         self.broadcast_link_state()
     def __repr__(self):
         return (f"LSrouter(addr={self.addr}, "
                 f"neighbors={list(self.neighbors.values())}, "
