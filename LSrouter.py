@@ -1,6 +1,7 @@
 ####################################################
 # LSrouter.py
-# Name: [Your name]
+# Name: [Mạch Trần Quang Nhật]
+# Gmail: [23021653@vnu.edu.vn]
 # HUID: [Your HUID]
 #####################################################
 
@@ -15,14 +16,14 @@ from typing import Dict, Tuple, List
 class LSrouter(Router):
     def __init__(self, addr, heartbeat_time):
         Router.__init__(self, addr)
-        self.heartbeat_time = heartbeat_time
+        self.heartbeat_time = heartbeat_time # thời gian giữa các lần gửi LSP định kỳ.
+        self.last_time = 0 # thời điểm cuối cùng gửi LSP.
 
-        self.last_time = 0
-        self.link_costs: Dict[Tuple[int, str], float] = {}  # (port, endpoint_addr): cost
-        self.link_state_db: Dict[str, Dict[str, float]] = defaultdict(dict)  # router_addr: {neighbor_addr: cost}
+        self.link_costs: Dict[Tuple[int, str], float] = {}  # (port, endpoint_addr): cost; vd: {(1, 'B'): 2.0}
+        self.link_state_db: Dict[str, Dict[str, float]] = defaultdict(dict)  # router_addr: {neighbor_addr: cost}; vd 'A': {'B': 1.0, 'C': 3.0},
         self.sequence_numbers: Dict[str, int] = {}  # router_addr: seq_num
-        self.forwarding_table: Dict[str, int] = {}  # dst_addr: port
-        self.neighbors: Dict[int, str] = {}  # port: endpoint_addr
+        self.forwarding_table: Dict[str, int] = {}  # dst_addr: port; vd {'C': 2}
+        self.neighbors: Dict[int, str] = {}  # port: endpoint_addr; vd {1: 'B', 2: 'C'}
         self.seq_num: int = 0
 
         # Đảm bảo self.addr có entry trong link_state_db ngay từ đầu
@@ -44,6 +45,7 @@ class LSrouter(Router):
             payload_dict = content_input
 
         content_str = json.dumps(payload_dict)
+        #print(content_str)
         return Packet(kind, self.addr, None, content_str)
 
     def dijkstra(self):
@@ -52,7 +54,8 @@ class LSrouter(Router):
         pq: List[Tuple[float, str]] = [(0, self.addr)]
 
         # Tạo một bản sao của LSDB để tránh thay đổi trong quá trình chạy Dijkstra
-        lsdb_copy = {router: dict(links) for router, links in self.link_state_db.items()}
+        lsdb_copy = {router: dict(links)
+            for router, links in self.link_state_db.items()}
 
         while pq:
             current_dist, current_node = heapq.heappop(pq)
@@ -75,7 +78,7 @@ class LSrouter(Router):
                 if new_dist < distances.get(neighbor_node, float('inf')):
                     distances[neighbor_node] = new_dist
                     previous[neighbor_node] = current_node
-                    heapq.heappush(pq, (new_dist, neighbor_node))
+                    heapq.heappush(pq, (new_dist, neighbor_node)) # Đẩy lại vào heap
 
                 # Xử lý tie-breaking: nếu cùng độ dài, ưu tiên đường đi có thứ tự từ điển nhỏ hơn
                 elif new_dist == distances.get(neighbor_node, float('inf')):
@@ -90,21 +93,20 @@ class LSrouter(Router):
             if dst_addr == self.addr:
                 continue
 
-            # Bỏ qua các đích không thể đến được
             if distances[dst_addr] == float('inf'):
                 continue
 
-            # Khôi phục đường đi từ dst về self để tìm hop đầu tiên
+            # Truy ngược từ đích về self.addr để tìm đường đi ngắn nhất.
             path = []
             current = dst_addr
             while current != self.addr and current in previous:
                 path.append(current)
                 current = previous[current]
 
-            if current != self.addr:  # Không tìm thấy đường đi đến đích
+            if current != self.addr:  # Khôngthấy đường đi đến đích
                 continue
 
-            if not path:  # Trường hợp đặc biệt: đích là neighbor trực tiếp
+            if not path:  # đích là neighbor
                 continue
 
             # Hop đầu tiên là node cuối cùng trong path (vì path được xây dựng ngược)
@@ -116,7 +118,7 @@ class LSrouter(Router):
                     new_forwarding_table[dst_addr] = port
                     break
 
-        # Cập nhật forwarding table một cách nguyên tử để tránh trạng thái không nhất quán
+        # Cập nhật forwarding table
         self.forwarding_table = new_forwarding_table
 
     def broadcast_link_state(self):
@@ -132,9 +134,6 @@ class LSrouter(Router):
 
         # Tạo và gửi LSP
         packet = self.create_packet(self.link_costs, is_traceroute=False)
-
-        # In debug nếu cần
-        # print(f"ROUTER {self.addr}: Broadcasting LSP with seq_num={self.seq_num}, links={current_self_links}")
 
         # Gửi đến tất cả các neighbor
         for port in list(self.neighbors.keys()):
@@ -202,28 +201,25 @@ class LSrouter(Router):
                         continue
 
     def handle_new_link(self, port, endpoint, cost):
-        # Thêm hoặc cập nhật link
+        # thêm, hoặc cập nhật
         self.link_costs[(port, endpoint)] = float(cost)
         self.neighbors[port] = endpoint
 
-        # Cập nhật LSDB cho chính mình
+        # cập nhật LSDB cho mình
         current_self_links = {endpoint: c for (p, endpoint), c in self.link_costs.items()}
         self.link_state_db[self.addr] = current_self_links
 
-        # Tính toán lại các đường đi
+        # chạy lại dijk
         self.dijkstra()
 
-        # Thông báo cho các router khác về thay đổi
+        # báo cho router khác về thay đổi
         self.broadcast_link_state()
-
-        # ❌ QUAN TRỌNG: Không cần broadcast liên tục, chỉ một lần là đủ
-        # self.broadcast_link_state()  # Dòng này gây ra dao động định tuyến
 
     def handle_remove_link(self, port):
         # Kiểm tra xem port có tồn tại không
         if port in self.neighbors:
-            # Lưu endpoint trước khi xóa để debug
-            removed_endpoint = self.neighbors.pop(port)
+            # Lưu endpoint trước khi xóa
+            # removed_endpoint = self.neighbors.pop(port)
 
             # Cập nhật link_costs bằng cách lọc ra tất cả ngoại trừ port bị xóa
             self.link_costs = {k: v for k, v in self.link_costs.items() if k[0] != port}
@@ -244,8 +240,6 @@ class LSrouter(Router):
             self.last_time = time_ms
             # Gửi LSP định kỳ nếu có neighbors
             if self.neighbors:
-                # Chỉ broadcast nếu đã qua đủ thời gian heartbeat
-                # Tránh broadcast quá thường xuyên
                 self.broadcast_link_state()
 
     def __repr__(self):
