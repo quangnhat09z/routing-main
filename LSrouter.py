@@ -122,14 +122,14 @@ class LSrouter(Router):
         self.forwarding_table = new_forwarding_table
 
     def broadcast_link_state(self):
-        # Tăng sequence number khi gửi LSP mới
+        # Tăng seq number khi khỉ LSP mới
         self.seq_num += 1
 
-        # Cập nhật LSDB của chính router này
+        # Cập nhật LSDB của bản thân
         current_self_links = {endpoint: cost for (port, endpoint), cost in self.link_costs.items()}
         self.link_state_db[self.addr] = current_self_links
 
-        # Lưu trữ sequence number của chính mình vào LSDB
+        # Lưu trữ sequence number bản thân vào LSDB
         self.sequence_numbers[self.addr] = self.seq_num
 
         # Tạo và gửi LSP
