@@ -29,24 +29,16 @@ class LSrouter(Router):
         # Đảm bảo self.addr có entry trong link_state_db ngay từ đầu
         self.link_state_db[self.addr] = {}
 
-    def create_packet(self, content_input, is_traceroute=False):
-        kind = Packet.TRACEROUTE if is_traceroute else Packet.ROUTING
-        payload_dict = {}
-
-        if not is_traceroute:
-            # Chuyển đổi thành {endpoint: cost} cho routing packet
-            links_for_payload = {endpoint: cost for (port, endpoint), cost in content_input.items()}
-            payload_dict = {
-                'links': links_for_payload,
-                'seq_num': self.seq_num
-            }
-        else:
-            # Cho traceroute packet
-            payload_dict = content_input
-
+    def create_packet(self, content_input):
+        # Chuyển đổi thành {endpoint: cost} cho routing packet
+        links_for_payload = {endpoint: cost for (port, endpoint), cost in content_input.items()}
+        payload_dict = {
+            'links': links_for_payload,
+            'seq_num': self.seq_num
+        }
         content_str = json.dumps(payload_dict)
         #print(content_str)
-        return Packet(kind, self.addr, None, content_str)
+        return Packet(False, self.addr, None, content_str)
 
     def dijkstra(self):
         distances: Dict[str, float] = {self.addr: 0}
@@ -122,7 +114,7 @@ class LSrouter(Router):
         self.forwarding_table = new_forwarding_table
 
     def broadcast_link_state(self):
-        # Tăng seq number khi khỉ LSP mới
+        # Tăng seq number khi gửi LSP mới
         self.seq_num += 1
 
         # Cập nhật LSDB của bản thân
@@ -133,7 +125,7 @@ class LSrouter(Router):
         self.sequence_numbers[self.addr] = self.seq_num
 
         # Tạo và gửi LSP
-        packet = self.create_packet(self.link_costs, is_traceroute=False)
+        packet = self.create_packet(self.link_costs)
 
         # Gửi đến tất cả các neighbor
         for port in list(self.neighbors.keys()):
@@ -166,6 +158,7 @@ class LSrouter(Router):
                 # Lỗi phân tích nội dung packet
                 return
 
+            # Lấy thông tin nguồn vs stt hiện tại
             src_addr = packet.src_addr
             current_seq = self.sequence_numbers.get(src_addr, -1)
 
