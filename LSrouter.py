@@ -29,17 +29,6 @@ class LSrouter(Router):
         # Đảm bảo self.addr có entry trong link_state_db ngay từ đầu
         self.link_state_db[self.addr] = {}
 
-    def create_packet(self, content_input):
-        # Chuyển đổi thành {endpoint: cost} cho routing packet
-        links_for_payload = {endpoint: cost for (port, endpoint), cost in content_input.items()}
-        payload_dict = {
-            'links': links_for_payload,
-            'seq_num': self.seq_num
-        }
-        content_str = json.dumps(payload_dict)
-        #print(content_str)
-        return Packet(False, self.addr, None, content_str)
-
     def dijkstra(self):
         distances: Dict[str, float] = {self.addr: 0}
         previous: Dict[str, str] = {}
@@ -112,6 +101,17 @@ class LSrouter(Router):
 
         # Cập nhật forwarding table
         self.forwarding_table = new_forwarding_table
+
+    def create_packet(self, content_input):
+        # Chuyển đổi thành {endpoint: cost} cho routing packet
+        links_for_payload = {endpoint: cost for (port, endpoint), cost in content_input.items()}
+        payload_dict = {
+            'links': links_for_payload,
+            'seq_num': self.seq_num
+        }
+        content_str = json.dumps(payload_dict)
+        #print(content_str)
+        return Packet(False, self.addr, None, content_str)
 
     def broadcast_link_state(self):
         # Tăng seq number khi gửi LSP mới
