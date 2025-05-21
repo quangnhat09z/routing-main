@@ -59,13 +59,12 @@ class LSrouter(Router):
                 if new_dist < distances.get(neighbor_node, float('inf')):
                     distances[neighbor_node] = new_dist
                     previous[neighbor_node] = current_node
-                    heapq.heappush(pq, (new_dist, neighbor_node)) # Đẩy lại vào heap
+                    heapq.heappush(pq, (new_dist, neighbor_node))
 
                 # Xử lý tie-breaking: nếu cùng độ dài, ưu tiên đường đi có thứ tự từ điển nhỏ hơn
                 elif new_dist == distances.get(neighbor_node, float('inf')):
                     if current_node < previous.get(neighbor_node, current_node):
                         previous[neighbor_node] = current_node
-                        # Không cần đẩy lại vào heap vì khoảng cách không thay đổi
 
         # Xây dựng bảng chuyển tiếp
         new_forwarding_table: Dict[str, int] = {}
@@ -90,16 +89,13 @@ class LSrouter(Router):
             if not path:  # đích là neighbor
                 continue
 
-            # Hop đầu tiên là node cuối cùng trong path (vì path được xây dựng ngược)
             first_hop = path[-1]
 
-            # Tìm port tương ứng với hop đầu tiên
             for port, neighbor in self.neighbors.items():
                 if neighbor == first_hop:
                     new_forwarding_table[dst_addr] = port
                     break
 
-        # Cập nhật forwarding table
         self.forwarding_table = new_forwarding_table
 
     def create_packet(self, content_input):
@@ -138,7 +134,6 @@ class LSrouter(Router):
         if packet.is_traceroute:
             # Xử lý traceroute packet
             if packet.dst_addr == self.addr:
-                # Đã đến đích, không cần chuyển tiếp
                 return
             elif packet.dst_addr in self.forwarding_table:
                 # Chuyển tiếp đến đích
@@ -164,7 +159,6 @@ class LSrouter(Router):
 
             # Kiểm tra sequence number
             if seq_num_from_packet <= current_seq:
-                # LSP cũ hoặc trùng lặp, bỏ qua
                 return
 
             # Cập nhật sequence number
@@ -180,7 +174,6 @@ class LSrouter(Router):
             # Cập nhật LSDB
             self.link_state_db[src_addr] = updated_links
 
-            # Chỉ chạy Dijkstra nếu thực sự có sự thay đổi trong liên kết
             if links_changed:
                 self.dijkstra()
 
@@ -202,16 +195,13 @@ class LSrouter(Router):
         current_self_links = {endpoint: c for (p, endpoint), c in self.link_costs.items()}
         self.link_state_db[self.addr] = current_self_links
 
-        # chạy lại dijk
         self.dijkstra()
 
-        # báo cho router khác về thay đổi
         self.broadcast_link_state()
 
     def handle_remove_link(self, port):
         # Kiểm tra xem port có tồn tại không
         if port in self.neighbors:
-            # Lưu endpoint trước khi xóa
             # removed_endpoint = self.neighbors.pop(port)
 
             # Cập nhật link_costs bằng cách lọc ra tất cả ngoại trừ port bị xóa
@@ -221,14 +211,11 @@ class LSrouter(Router):
             current_self_links = {endpoint: c for (p, endpoint), c in self.link_costs.items()}
             self.link_state_db[self.addr] = current_self_links
 
-            # Tính toán lại các đường đi
             self.dijkstra()
 
-            # Thông báo cho các router khác về thay đổi
             self.broadcast_link_state()
 
     def handle_time(self, time_ms):
-        # Kiểm tra xem có nên gửi heartbeat không
         if time_ms - self.last_time >= self.heartbeat_time:
             self.last_time = time_ms
             # Gửi LSP định kỳ nếu có neighbors
